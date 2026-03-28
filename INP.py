@@ -1,6 +1,5 @@
 # ida_export_for_ai.py
 # IDA Plugin to export decompiled functions, strings, memory, imports and exports for AI analysis
-# Compatible with IDA 9.0+
 
 import os
 import sys
@@ -16,72 +15,62 @@ import idc
 import ida_auto
 import ida_kernwin
 import ida_idaapi
+import ida_undo
+import ida_idp
 import ida_ida
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import multiprocessing as mp
 
-# Conditionally import modules that may not exist in IDA 9.0
-try:
-    import ida_undo
-    HAS_IDA_UNDO = True
-except ImportError:
-    HAS_IDA_UNDO = False
-
-try:
-    import ida_idp
-    HAS_IDA_IDP = True
-except ImportError:
-    HAS_IDA_IDP = False
-
 WORKER_COUNT = max(1, mp.cpu_count() - 1)
 TASK_BATCH_SIZE = 50
+
 
 def get_worker_count():
     """获取用户配置的并行工作线程数"""
     return WORKER_COUNT
 
+
 def get_idb_directory():
     """获取 IDB 文件所在目录"""
     idb_path = ida_nalt.get_input_file_path()
     if not idb_path:
-        try:
-            import ida_loader
-            idb_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
-        except:
-            pass
+        import ida_loader
+        idb_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
     return os.path.dirname(idb_path) if idb_path else os.getcwd()
+
 
 def ensure_dir(path):
     """确保目录存在"""
     if not os.path.exists(path):
         os.makedirs(path)
 
+
 def clear_undo_buffer():
     """清理 IDA 撤销缓冲区，防止内存溢出"""
     try:
-        if HAS_IDA_UNDO:
-            ida_undo.clear_undo_buffer()
+        ida_undo.clear_undo_buffer()
         gc.collect()
     except:
         pass
 
+
 def disable_undo():
-    """禁用撤销功能"""
+    """禁用撤销功能（IDA 7.0+）"""
     try:
-        if HAS_IDA_IDP and hasattr(ida_idp, 'disable_undo'):
-            ida_idp.disable_undo(True)
+        ida_idp.disable_undo(True)
     except:
         pass
+
 
 def enable_undo():
     """启用撤销功能"""
     try:
-        if HAS_IDA_IDP and hasattr(ida_idp, 'disable_undo'):
-            ida_idp.disable_undo(False)
+        ida_idp.disable_undo(False)
     except:
         pass
+
 
 def get_callers(func_ea):
     """获取调用当前函数的地址列表"""
@@ -93,13 +82,14 @@ def get_callers(func_ea):
                 callers.append(caller_func.start_ea)
     return sorted(list(set(callers)))
 
+
 def get_callees(func_ea):
     """获取当前函数调用的函数地址列表"""
     callees = []
     func = ida_funcs.get_func(func_ea)
     if not func:
         return callees
-    
+
     for head in idautils.Heads(func.start_ea, func.end_ea):
         if idc.is_code(idc.get_full_flags(head)):
             for ref in idautils.XrefsFrom(head, 0):
@@ -109,9 +99,11 @@ def get_callees(func_ea):
                         callees.append(callee_func.start_ea)
     return sorted(list(set(callees)))
 
+
 def format_address_list(addr_list):
     """格式化地址列表为逗号分隔的十六进制字符串"""
     return ", ".join([hex(addr) for addr in addr_list])
+
 
 def sanitize_filename(name):
     """清理函数名，使其适合作为文件名"""
@@ -122,6 +114,7 @@ def sanitize_filename(name):
     if len(name) > 200:
         name = name[:200]
     return name
+
 
 def save_progress(export_dir, processed_addrs, failed_funcs, skipped_funcs):
     """保存当前进度到文件"""
@@ -139,16 +132,17 @@ def save_progress(export_dir, processed_addrs, failed_funcs, skipped_funcs):
     except Exception as e:
         print("[!] Failed to save progress: {}".format(str(e)))
 
+
 def load_progress(export_dir):
     """从文件加载进度"""
     progress_file = os.path.join(export_dir, ".export_progress")
     processed = set()
     failed = []
     skipped = []
-    
+
     if not os.path.exists(progress_file):
         return processed, failed, skipped
-    
+
     try:
         with open(progress_file, 'r', encoding='utf-8') as f:
             for line in f:
@@ -168,12 +162,13 @@ def load_progress(export_dir):
         print("[+] Loaded progress: {} functions already processed".format(len(processed)))
     except Exception as e:
         print("[!] Failed to load progress: {}".format(str(e)))
-    
+
     return processed, failed, skipped
+
 
 def export_decompiled_functions(export_dir, skip_existing=True):
     """导出所有函数的反编译代码（内存优化版 - 流式处理）
-    
+
     Args:
         export_dir: 导出目录
         skip_existing: 是否跳过已存在的文件
@@ -199,13 +194,13 @@ def export_decompiled_functions(export_dir, skip_existing=True):
     # 收集所有函数地址
     all_funcs = list(idautils.Functions())
     total_funcs = len(all_funcs)
-    
+
     # 过滤掉已处理的函数
     remaining_funcs = [ea for ea in all_funcs if ea not in processed_addrs]
-    
+
     print("[*] Found {} functions total, {} remaining to process".format(total_funcs, len(remaining_funcs)))
     print("[*] Memory-optimized mode: processing one function at a time")
-    
+
     if len(remaining_funcs) == 0:
         print("[+] All functions already exported!")
         io_executor.shutdown(wait=False)
@@ -215,11 +210,11 @@ def export_decompiled_functions(export_dir, skip_existing=True):
     BATCH_SIZE = 10  # 减小批量大小
     MEMORY_CLEAN_INTERVAL = 5  # 更频繁地清理内存
     pending_writes = []
-    
+
     def write_function_file(args):
         """线程安全的文件写入"""
         func_ea, func_name, dec_str, callers, callees = args
-        
+
         output_lines = []
         output_lines.append("/*")
         output_lines.append(" * func-name: {}".format(func_name))
@@ -232,30 +227,31 @@ def export_decompiled_functions(export_dir, skip_existing=True):
 
         output_filename = "{:X}.c".format(func_ea)
         output_path = os.path.join(decompile_dir, output_filename)
-        
+
         try:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(output_lines))
             return func_ea, func_name, True, output_filename, callers, callees, None
         except IOError as e:
             return func_ea, func_name, False, output_filename, callers, callees, str(e)
-    
+
     def aggressive_memory_cleanup():
         """激进的内存清理"""
-        # 清理IDA Hex-Rays内部缓存
+        # 强制删除大对象引用
+        import sys
+        # 清理IDA内部缓存
         try:
-            if hasattr(ida_hexrays, 'clear_cached_cfuncs'):
-                ida_hexrays.clear_cached_cfuncs()
+            ida_hexrays.clear_cached_cfuncs()
         except:
             pass
         # 强制垃圾回收
         gc.collect()
         gc.collect()  # 两次收集确保清理
-    
+
     for idx, func_ea in enumerate(remaining_funcs):
         # 实时获取函数信息（不缓存）
         func_name = idc.get_func_name(func_ea)
-        
+
         # 跳过外部函数和导入函数
         func = ida_funcs.get_func(func_ea)
         if func is None:
@@ -270,7 +266,7 @@ def export_decompiled_functions(export_dir, skip_existing=True):
 
         dec_str = None
         dec_obj = None
-        
+
         try:
             # 尝试反编译
             dec_obj = ida_hexrays.decompile(func_ea)
@@ -282,7 +278,7 @@ def export_decompiled_functions(export_dir, skip_existing=True):
             dec_str = str(dec_obj)
             # 立即释放反编译对象
             dec_obj = None
-            
+
             if not dec_str or len(dec_str.strip()) == 0:
                 failed_funcs.append((func_ea, func_name, "empty decompilation result"))
                 processed_addrs.add(func_ea)
@@ -294,7 +290,7 @@ def export_decompiled_functions(export_dir, skip_existing=True):
 
             output_filename = "{:X}.c".format(func_ea)
             output_path = os.path.join(decompile_dir, output_filename)
-            
+
             # 如果文件已存在且skip_existing为True，则跳过
             if skip_existing and os.path.exists(output_path):
                 exported_funcs += 1
@@ -302,17 +298,18 @@ def export_decompiled_functions(export_dir, skip_existing=True):
                 # 立即释放dec_str
                 dec_str = None
                 if (exported_funcs + len(prev_failed) + len(prev_skipped)) % 100 == 0:
-                    print("[+] Exported {} / {} functions...".format(exported_funcs + len(prev_failed) + len(prev_skipped), total_funcs))
+                    print("[+] Exported {} / {} functions...".format(
+                        exported_funcs + len(prev_failed) + len(prev_skipped), total_funcs))
                 continue
 
             # 提交写入任务
             write_args = (func_ea, func_name, dec_str, callers, callees)
             future = io_executor.submit(write_function_file, write_args)
             pending_writes.append((future, func_ea, func_name, output_filename, callers, callees))
-            
+
             # 立即释放dec_str，因为已经传递给写入任务
             dec_str = None
-            
+
         except ida_hexrays.DecompilationFailure as e:
             failed_funcs.append((func_ea, func_name, "decompilation failure: {}".format(str(e))))
             processed_addrs.add(func_ea)
@@ -326,19 +323,19 @@ def export_decompiled_functions(export_dir, skip_existing=True):
             # 确保反编译对象被释放
             dec_obj = None
             dec_str = None
-        
+
         # 定期清理撤销缓冲区
         if (idx + 1) % MEMORY_CLEAN_INTERVAL == 0:
             clear_undo_buffer()
             aggressive_memory_cleanup()
-        
+
         # 批量等待写入完成并收集结果
         if len(pending_writes) >= BATCH_SIZE:
             for future, func_ea, func_name, output_filename, callers, callees in pending_writes:
                 try:
                     result = future.result()
                     func_ea, func_name, success, output_filename, callers, callees, error = result
-                    
+
                     if success:
                         func_info = {
                             'address': func_ea,
@@ -354,31 +351,32 @@ def export_decompiled_functions(export_dir, skip_existing=True):
                     else:
                         failed_funcs.append((func_ea, func_name, "IO error: {}".format(error)))
                         processed_addrs.add(func_ea)
-                    
+
                 except Exception as e:
                     print("[!] Write error: {}".format(str(e)))
-            
+
             # 保存进度并清理
             save_progress(export_dir, processed_addrs, failed_funcs, skipped_funcs)
             if exported_funcs % 100 == 0:
-                print("[+] Exported {} / {} functions...".format(exported_funcs + len(prev_failed) + len(prev_skipped), total_funcs))
-            
+                print("[+] Exported {} / {} functions...".format(exported_funcs + len(prev_failed) + len(prev_skipped),
+                                                                 total_funcs))
+
             # 清理索引，避免内存无限增长
             if len(function_index) > 1000:
                 # 保存到临时文件后清空
                 function_index = []
                 addr_to_info = {}
-            
+
             pending_writes = []
             aggressive_memory_cleanup()
-    
+
     # 处理剩余的写入任务
     if pending_writes:
         for future, func_ea, func_name, output_filename, callers, callees in pending_writes:
             try:
                 result = future.result()
                 func_ea, func_name, success, output_filename, callers, callees, error = result
-                
+
                 if success:
                     func_info = {
                         'address': func_ea,
@@ -394,16 +392,16 @@ def export_decompiled_functions(export_dir, skip_existing=True):
                 else:
                     failed_funcs.append((func_ea, func_name, "IO error: {}".format(error)))
                     processed_addrs.add(func_ea)
-                
+
             except Exception as e:
                 print("[!] Write error: {}".format(str(e)))
-    
+
     # 关闭线程池
     io_executor.shutdown(wait=True)
-    
+
     # 最终保存进度
     save_progress(export_dir, processed_addrs, failed_funcs, skipped_funcs)
-    
+
     print("\n[*] Decompilation Summary:")
     print("    Total functions: {}".format(total_funcs))
     print("    Exported: {}".format(exported_funcs))
@@ -485,18 +483,19 @@ def export_decompiled_functions(export_dir, skip_existing=True):
 
         print("    Function index saved to: function_index.txt")
 
+
 def export_strings(export_dir):
     """导出所有字符串"""
     strings_path = os.path.join(export_dir, "strings.txt")
-    
+
     string_count = 0
     BATCH_SIZE = 500  # 每500个字符串清理一次
-    
+
     with open(strings_path, 'w', encoding='utf-8') as f:
         f.write("# Strings exported from IDA\n")
         f.write("# Format: address | length | type | string\n")
         f.write("#" + "=" * 80 + "\n\n")
-        
+
         for idx, s in enumerate(idautils.Strings()):
             try:
                 string_content = str(s)
@@ -505,7 +504,7 @@ def export_strings(export_dir):
                     str_type = "UTF-16"
                 elif s.strtype == ida_nalt.STRTYPE_C_32:
                     str_type = "UTF-32"
-                
+
                 f.write("{} | {} | {} | {}\n".format(
                     hex(s.ea),
                     s.length,
@@ -513,31 +512,32 @@ def export_strings(export_dir):
                     string_content.replace('\n', '\\n').replace('\r', '\\r')
                 ))
                 string_count += 1
-                
+
                 # 定期清理撤销缓冲区
                 if (idx + 1) % BATCH_SIZE == 0:
                     clear_undo_buffer()
-                    
+
             except Exception as e:
                 continue
-    
+
     print("[*] Strings Summary:")
     print("    Total strings exported: {}".format(string_count))
+
 
 def export_imports(export_dir):
     """导出导入表"""
     imports_path = os.path.join(export_dir, "imports.txt")
-    
+
     import_count = 0
     with open(imports_path, 'w', encoding='utf-8') as f:
         f.write("# Imports\n")
         f.write("# Format: func-addr:func-name\n")
         f.write("#" + "=" * 60 + "\n\n")
-        
+
         nimps = ida_nalt.get_import_module_qty()
         for i in range(nimps):
             module_name = ida_nalt.get_import_module_name(i)
-            
+
             def imp_cb(ea, name, ordinal):
                 nonlocal import_count
                 if name:
@@ -546,80 +546,82 @@ def export_imports(export_dir):
                     f.write("{}:ordinal_{}\n".format(hex(ea), ordinal))
                 import_count += 1
                 return True
-            
+
             ida_nalt.enum_import_names(i, imp_cb)
-    
+
     print("[*] Imports Summary:")
     print("    Total imports exported: {}".format(import_count))
+
 
 def export_exports(export_dir):
     """导出导出表"""
     exports_path = os.path.join(export_dir, "exports.txt")
-    
+
     export_count = 0
     with open(exports_path, 'w', encoding='utf-8') as f:
         f.write("# Exports\n")
         f.write("# Format: func-addr:func-name\n")
         f.write("#" + "=" * 60 + "\n\n")
-        
+
         for i in range(ida_entry.get_entry_qty()):
             ordinal = ida_entry.get_entry_ordinal(i)
             ea = ida_entry.get_entry(ordinal)
             name = ida_entry.get_entry_name(ordinal)
-            
+
             if name:
                 f.write("{}:{}\n".format(hex(ea), name))
             else:
                 f.write("{}:ordinal_{}\n".format(hex(ea), ordinal))
             export_count += 1
-    
+
     print("[*] Exports Summary:")
     print("    Total exports exported: {}".format(export_count))
+
 
 def export_memory(export_dir):
     """导出内存数据，按 1MB 分割，hexdump 格式"""
     memory_dir = os.path.join(export_dir, "memory")
     ensure_dir(memory_dir)
-    
+
     CHUNK_SIZE = 1 * 1024 * 1024  # 1MB
     BYTES_PER_LINE = 16
-    
+
     total_bytes = 0
     file_count = 0
-    
+
     for seg_idx in range(ida_segment.get_segm_qty()):
         seg = ida_segment.getnseg(seg_idx)
         if seg is None:
             continue
-        
+
         seg_start = seg.start_ea
         seg_end = seg.end_ea
         seg_name = ida_segment.get_segm_name(seg)
-        
+
         print("[*] Processing segment: {} ({} - {})".format(
             seg_name, hex(seg_start), hex(seg_end)))
-        
+
         current_addr = seg_start
         while current_addr < seg_end:
             chunk_end = min(current_addr + CHUNK_SIZE, seg_end)
-            
+
             filename = "{:08X}--{:08X}.txt".format(current_addr, chunk_end)
             filepath = os.path.join(memory_dir, filename)
-            
+
             # 跳过已存在的文件
             if os.path.exists(filepath):
                 file_count += 1
                 current_addr = chunk_end
                 total_bytes += (chunk_end - current_addr)
                 continue
-            
+
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write("# Memory dump: {} - {}\n".format(hex(current_addr), hex(chunk_end)))
                 f.write("# Segment: {}\n".format(seg_name))
                 f.write("#" + "=" * 76 + "\n\n")
                 f.write("# Address        | Hex Bytes                                       | ASCII\n")
                 f.write("#" + "-" * 76 + "\n")
-                
+
                 addr = current_addr
                 while addr < chunk_end:
                     line_bytes = []
@@ -632,11 +634,11 @@ def export_memory(export_dir):
                                 line_bytes.append(0)
                         else:
                             break
-                    
+
                     if not line_bytes:
                         addr += BYTES_PER_LINE
                         continue
-                    
+
                     hex_part = ""
                     for i, b in enumerate(line_bytes):
                         hex_part += "{:02X} ".format(b)
@@ -647,28 +649,333 @@ def export_memory(export_dir):
                         if len(line_bytes) <= 8:
                             hex_part += " "
                         hex_part += "   " * remaining
-                    
+
                     ascii_part = ""
                     for b in line_bytes:
                         if 0x20 <= b <= 0x7E:
                             ascii_part += chr(b)
                         else:
                             ascii_part += "."
-                    
+
                     f.write("{:016X} | {} | {}\n".format(addr, hex_part.ljust(49), ascii_part))
-                    
+
                     addr += BYTES_PER_LINE
                     total_bytes += len(line_bytes)
-            
+
             file_count += 1
             current_addr = chunk_end
-            
+
             # 每处理完一个chunk清理一次撤销缓冲区
             clear_undo_buffer()
-    
+
     print("\n[*] Memory Export Summary:")
-    print("    Total bytes exported: {} ({:.2f} MB)".format(total_bytes, total_bytes / (1024*1024)))
+    print("    Total bytes exported: {} ({:.2f} MB)".format(total_bytes, total_bytes / (1024 * 1024)))
     print("    Files created: {}".format(file_count))
+
+
+def _ptr_export_get_ptr_size():
+    """获取当前数据库的指针大小"""
+    return 8 if ida_ida.inf_is_64bit() else 4
+
+
+def _ptr_export_read_pointer(ea, ptr_size):
+    """读取指针值"""
+    return ida_bytes.get_qword(ea) if ptr_size == 8 else ida_bytes.get_dword(ea)
+
+
+def _ptr_export_get_segment_name(ea):
+    """获取地址所在段名"""
+    seg = ida_segment.getseg(ea)
+    if not seg:
+        return "unknown"
+    name = ida_segment.get_segm_name(seg)
+    return name if name else "unknown"
+
+
+def _ptr_export_is_valid_target(target_ea):
+    """判断目标地址是否落在有效段内"""
+    if target_ea in (0, ida_idaapi.BADADDR):
+        return False
+    return ida_segment.getseg(target_ea) is not None
+
+
+def _ptr_export_safe_text(value):
+    """将文本压成单行，便于写入导出文件"""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8", errors="replace")
+        except Exception:
+            value = repr(value)
+    else:
+        value = str(value)
+
+    value = value.replace("\r", " ").replace("\n", " ").replace("|", "/").strip()
+    if len(value) > 80:
+        value = value[:77] + "..."
+    return value
+
+
+def _ptr_export_get_target_name(target_ea):
+    """获取目标符号名"""
+    name = idc.get_name(target_ea, idc.GN_VISIBLE)
+    if not name:
+        func = ida_funcs.get_func(target_ea)
+        if func:
+            name = idc.get_func_name(func.start_ea)
+    if not name:
+        name = "unknown"
+    return _ptr_export_safe_text(name)
+
+
+def _ptr_export_try_get_string_preview(target_ea):
+    """尝试提取字符串预览"""
+    try:
+        flags = ida_bytes.get_full_flags(target_ea)
+        if not ida_bytes.is_strlit(flags):
+            return ""
+    except Exception:
+        return ""
+
+    try:
+        strtype = idc.get_str_type(target_ea)
+    except Exception:
+        strtype = -1
+
+    try:
+        raw = ida_bytes.get_strlit_contents(target_ea, -1, strtype)
+    except Exception:
+        raw = None
+
+    preview = _ptr_export_safe_text(raw)
+    if preview:
+        return '"{}"'.format(preview)
+    return "string_literal"
+
+
+def _ptr_export_is_import_target(target_ea, target_name):
+    """启发式判断是否为导入项/IAT"""
+    seg_name = _ptr_export_get_segment_name(target_ea).lower()
+    name_l = (target_name or "").lower()
+
+    if name_l.startswith("__imp_") or name_l.startswith("imp_"):
+        return True
+
+    import_like_segments = {
+        "extern", ".idata", "idata", ".idata$2", ".idata$4", ".idata$5", ".idata$6",
+        ".got", "got", ".got.plt", "got.plt", "__la_symbol_ptr", "__nl_symbol_ptr"
+    }
+    return seg_name in import_like_segments
+
+
+def _ptr_export_classify_target(target_ea):
+    """返回 (target_name, target_type, target_detail)"""
+    target_name = _ptr_export_get_target_name(target_ea)
+
+    try:
+        flags = ida_bytes.get_full_flags(target_ea)
+    except Exception:
+        flags = 0
+
+    if _ptr_export_is_import_target(target_ea, target_name):
+        return target_name, "import_pointer", "import_entry"
+
+    try:
+        if ida_bytes.is_strlit(flags):
+            return target_name, "string_pointer", _ptr_export_try_get_string_preview(target_ea)
+    except Exception:
+        pass
+
+    try:
+        func = ida_funcs.get_func(target_ea)
+    except Exception:
+        func = None
+
+    if func:
+        if func.start_ea == target_ea:
+            return target_name, "function_pointer", "function_start"
+        func_name = _ptr_export_get_target_name(func.start_ea)
+        return target_name, "code_pointer", "inside_{}".format(func_name)
+
+    try:
+        if ida_bytes.is_code(flags):
+            return target_name, "code_pointer", "instruction"
+    except Exception:
+        pass
+
+    try:
+        if ida_bytes.is_struct(flags):
+            return target_name, "struct_pointer", "struct_data"
+    except Exception:
+        pass
+
+    try:
+        if ida_bytes.is_data(flags):
+            return target_name, "data_pointer", "data_item_size={}".format(ida_bytes.get_item_size(target_ea))
+    except Exception:
+        pass
+
+    return target_name, "unknown_pointer", ""
+
+
+def _ptr_export_add_record(records, seen, source_ea, target_ea):
+    """去重后加入一条记录"""
+    key = (source_ea, target_ea)
+    if key in seen:
+        return
+    seen.add(key)
+
+    target_name, target_type, target_detail = _ptr_export_classify_target(target_ea)
+    records.append({
+        "source_addr": source_ea,
+        "source_seg": _ptr_export_get_segment_name(source_ea),
+        "points_to": target_ea,
+        "target_name": target_name,
+        "target_type": target_type,
+        "target_detail": target_detail,
+    })
+
+
+def _ptr_export_collect_data_xrefs(records, seen):
+    """收集所有代码头/数据头上的 data xref"""
+    total = 0
+
+    for seg_idx in range(ida_segment.get_segm_qty()):
+        seg = ida_segment.getnseg(seg_idx)
+        if not seg:
+            continue
+
+        for head in idautils.Heads(seg.start_ea, seg.end_ea):
+            try:
+                flags = ida_bytes.get_full_flags(head)
+            except Exception:
+                continue
+
+            if not ida_bytes.is_head(flags):
+                continue
+            if not (ida_bytes.is_code(flags) or ida_bytes.is_data(flags)):
+                continue
+
+            try:
+                target = ida_xref.get_first_dref_from(head)
+            except Exception:
+                target = ida_idaapi.BADADDR
+
+            while target != ida_idaapi.BADADDR:
+                if _ptr_export_is_valid_target(target):
+                    _ptr_export_add_record(records, seen, head, target)
+                    total += 1
+                try:
+                    target = ida_xref.get_next_dref_from(head, target)
+                except Exception:
+                    break
+
+    return total
+
+
+def _ptr_export_collect_raw_pointers(records, seen, ptr_size):
+    """扫描常见数据段中的裸指针，补齐未建立 xref 的项"""
+    total = 0
+
+    for seg_ea in idautils.Segments():
+        seg_name = idc.get_segm_name(seg_ea)
+        seg_start = idc.get_segm_start(seg_ea)
+        seg_end = idc.get_segm_end(seg_ea)
+
+        if not seg_name or not (
+                seg_name.startswith(".data") or seg_name.startswith(".rdata") or seg_name.startswith("data")):
+            continue
+
+        print("[*] Scanning segment: {} ({:X} - {:X})".format(seg_name, seg_start, seg_end))
+
+        for head in idautils.Heads(seg_start, seg_end):
+            try:
+                flags = ida_bytes.get_full_flags(head)
+            except Exception:
+                continue
+
+            if not ida_bytes.is_head(flags):
+                continue
+            if not ida_bytes.is_data(flags):
+                continue
+
+            try:
+                item_size = ida_bytes.get_item_size(head)
+            except Exception:
+                item_size = 0
+
+            if item_size < ptr_size:
+                continue
+
+            slot_count = item_size // ptr_size
+            if slot_count <= 0:
+                continue
+
+            for i in range(slot_count):
+                slot_ea = head + i * ptr_size
+                try:
+                    target = _ptr_export_read_pointer(slot_ea, ptr_size)
+                except Exception:
+                    continue
+
+                if _ptr_export_is_valid_target(target):
+                    _ptr_export_add_record(records, seen, slot_ea, target)
+                    total += 1
+
+    return total
+
+
+def export_pointers(export_dir):
+    """导出指针引用，保留原有导出目录模式"""
+    output_path = os.path.join(export_dir, "pointers.txt")
+    ptr_size = _ptr_export_get_ptr_size()
+    records = []
+    seen = set()
+
+    print("[*] Starting pointer scan. Pointer size: {} bytes".format(ptr_size))
+
+    dref_hits = _ptr_export_collect_data_xrefs(records, seen)
+    raw_hits = _ptr_export_collect_raw_pointers(records, seen, ptr_size)
+
+    records.sort(key=lambda item: (
+        item["source_addr"],
+        item["points_to"],
+        item["source_seg"],
+        item["target_name"],
+        item["target_type"],
+        item["target_detail"],
+    ))
+
+    if records:
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write("# Total Pointers Found: {}\n".format(len(records)))
+                f.write(
+                    "# Format: Source_Address | Segment | Points_To_Address | Target_Name | Target_Type | Target_Detail\n")
+                f.write("# Pointer size: {}\n".format(ptr_size))
+                f.write("# Data xref hits: {}\n".format(dref_hits))
+                f.write("# Raw pointer hits: {}\n".format(raw_hits))
+                f.write("-" * 120 + "\n")
+                for p in records:
+                    f.write("{:X} | {} | {:X} | {} | {} | {}\n".format(
+                        p["source_addr"],
+                        p["source_seg"],
+                        p["points_to"],
+                        p["target_name"],
+                        p["target_type"],
+                        p["target_detail"]
+                    ))
+            print("[+] Pointers exported to: {}".format(output_path))
+            print("[*] Pointers Summary:")
+            print("    Data xref hits: {}".format(dref_hits))
+            print("    Raw pointer hits: {}".format(raw_hits))
+            print("    Unique pointer references exported: {}".format(len(records)))
+        except Exception as e:
+            print("[!] Failed to write pointers: {}".format(str(e)))
+    else:
+        print("[*] No pointers found or no data segments scanned.")
+
 
 def do_export(export_dir=None, ask_user=True, skip_auto_analysis=False, worker_count=None):
     """执行导出操作
@@ -680,18 +987,18 @@ def do_export(export_dir=None, ask_user=True, skip_auto_analysis=False, worker_c
         worker_count: 并行工作线程数，默认为CPU核心数-1
     """
     global WORKER_COUNT
-    
+
     if worker_count is not None:
         WORKER_COUNT = max(1, worker_count)
-    
+
     print("=" * 60)
     print("IDA Export for AI Analysis")
     print("=" * 60)
     print("[*] Using {} worker threads for parallel I/O".format(WORKER_COUNT))
-    
+
     # 初始清理
     clear_undo_buffer()
-    
+
     # 尝试禁用撤销功能以减少内存使用
     disable_undo()
 
@@ -706,12 +1013,12 @@ def do_export(export_dir=None, ask_user=True, skip_auto_analysis=False, worker_c
     if not skip_auto_analysis:
         print("[*] Waiting for auto-analysis to complete...")
         print("[*] Tip: This may take a while for large files. Press Ctrl+Break to cancel.")
-        
+
         # 在auto_wait之前清理一次
         clear_undo_buffer()
-        
+
         ida_auto.auto_wait()
-        
+
         # auto_wait之后立即清理
         clear_undo_buffer()
     else:
@@ -723,7 +1030,8 @@ def do_export(export_dir=None, ask_user=True, skip_auto_analysis=False, worker_c
 
         if ask_user:
             choice = ida_kernwin.ask_yn(ida_kernwin.ASKBTN_YES,
-                "Export to default directory?\n\n{}\n\nYes: Use default directory\nNo: Choose custom directory\nCancel: Abort export".format(default_export_dir))
+                                        "Export to default directory?\n\n{}\n\nYes: Use default directory\nNo: Choose custom directory\nCancel: Abort export".format(
+                                            default_export_dir))
 
             if choice == ida_kernwin.ASKBTN_CANCEL:
                 print("[*] Export cancelled by user")
@@ -763,10 +1071,18 @@ def do_export(export_dir=None, ask_user=True, skip_auto_analysis=False, worker_c
     clear_undo_buffer()
     print("")
 
+    # [新增] 导出指针引用
+    print("[*] Exporting pointers...")
+    export_pointers(export_dir)
+    clear_undo_buffer()
+    print("")
+
     print("[*] Exporting memory...")
     export_memory(export_dir)
     clear_undo_buffer()
     print("")
+
+
 
     if has_hexrays:
         print("[*] Exporting decompiled functions...")
@@ -775,7 +1091,7 @@ def do_export(export_dir=None, ask_user=True, skip_auto_analysis=False, worker_c
 
     # 恢复撤销功能
     enable_undo()
-    
+
     print("")
     print("=" * 60)
     print("[+] Export completed!")
@@ -810,15 +1126,15 @@ class ExportForAIPlugin(ida_idaapi.plugin_t):
         try:
             # 询问是否跳过自动分析（如果用户已经分析完成）
             choice = ida_kernwin.ask_yn(ida_kernwin.ASKBTN_YES,
-                "Has the auto-analysis already completed?\n\n"
-                "Yes: Skip waiting for auto-analysis (faster)\n"
-                "No: Wait for auto-analysis to complete\n"
-                "Cancel: Abort export")
-            
+                                        "Has the auto-analysis already completed?\n\n"
+                                        "Yes: Skip waiting for auto-analysis (faster)\n"
+                                        "No: Wait for auto-analysis to complete\n"
+                                        "Cancel: Abort export")
+
             if choice == ida_kernwin.ASKBTN_CANCEL:
                 print("[*] Export cancelled by user")
                 return
-            
+
             skip_analysis = (choice == ida_kernwin.ASKBTN_YES)
             do_export(skip_auto_analysis=skip_analysis)
         except Exception as e:
@@ -843,30 +1159,20 @@ def PLUGIN_ENTRY():
 
 if __name__ == "__main__":
     # 支持作为独立脚本运行（用于批处理模式）
-    # IDA 9.0 兼容的参数获取方式
-    export_dir = None
-    skip_analysis = False
-    
-    try:
-        # 优先使用 idc.ARGV（IDA 9.0+ 推荐方式）
-        if hasattr(idc, 'ARGV') and idc.ARGV is not None and len(idc.ARGV) > 1:
-            export_dir = idc.ARGV[1]
-            if len(idc.ARGV) > 2:
-                skip_analysis = (idc.ARGV[2] == "1")
-        else:
-            # 回退到 eval_idc 方式（旧版 IDA 兼容）
-            argc = int(idc.eval_idc("ARGV.count"))
-            if argc >= 2:
-                export_dir = idc.eval_idc("ARGV[1]")
-            if argc >= 3:
-                skip_analysis = (idc.eval_idc("ARGV[2]") == "1")
-    except:
-        # 如果参数获取失败，使用默认值
-        pass
+    argc = int(idc.eval_idc("ARGV.count"))
+    if argc < 2:
+        export_dir = None
+        skip_analysis = False
+    elif argc < 3:
+        export_dir = idc.eval_idc("ARGV[1]")
+        skip_analysis = False
+    else:
+        export_dir = idc.eval_idc("ARGV[1]")
+        skip_analysis = (idc.eval_idc("ARGV[2]") == "1")
 
     # 批处理模式不询问用户
     do_export(export_dir, ask_user=False, skip_auto_analysis=skip_analysis)
 
-    # 脚本执行完成后自动退出IDA
-    print("[*] Script execution completed, exiting IDA...")
-    idc.qexit(0)
+    # 只在批处理模式下退出
+    if argc >= 2:
+        idc.qexit(0)
